@@ -3,9 +3,8 @@ import os
 import logging
 import re
 import json
-
 import fitz  # pymupdf
-from sentence_transformers import SentenceTransformer
+import cohere
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import ollama
@@ -23,10 +22,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in your .env file" )
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-model = SentenceTransformer("all-MiniLM-L6-v2")
+co = cohere.Client(os.environ.get("COHERE_API_KEY"))
 EMBED_MODEL_NAME = "qwen3.5:4b"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GROQ_MODEL = "qwen/qwen3.6-27b"
+GROQ_MODEL = "openai/gpt-oss-20b"
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
@@ -206,13 +205,18 @@ def ingest_pdf(file_path: str) -> int:
     if not chunks:
         raise ValueError(f"'{path.name}' produced no chunks after splitting")
     try:
-        vectors = model.encode(chunks)
+        response = co.embed(
+            texts=chunks,
+            model="embed-english-light-v3.0",
+            input_type="search_document",
+        )
+        vectors = response.embeddings
     except Exception as e:
         raise RuntimeError(f"Embedding failed for '{path.name}': {e}") from e
     rows = [
         {
             "content": chunk,
-            "embedding": vector.tolist(),
+            "embedding": vector,
             "source_file": path.name,
             "chunk_index": idx,
         }
@@ -226,9 +230,14 @@ def ingest_pdf(file_path: str) -> int:
     return len(chunks)
 
 # 4. Retrieval
-def search_documents(query: str, match_count: int = 5, match_threshold: float = 0.15):
+def search_documents(query: str, match_count: int = 3, match_threshold: float = 0.15):
     try:
-        query_vector = model.encode(query).tolist()
+        response = co.embed(
+            texts=[query],
+            model="embed-english-light-v3.0",
+            input_type="search_query",
+        )
+        query_vector = response.embeddings[0]
     except Exception as e:
         raise RuntimeError(f"Failed to embed query: {e}") from e
     try:

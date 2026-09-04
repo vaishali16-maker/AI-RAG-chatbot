@@ -2,9 +2,9 @@
 uvicorn[standard]
 python-multipart
 pymupdf
-sentence-transformers
 python-dotenv
 supabase
 ollama
 langgraph
 requests
+cohere
