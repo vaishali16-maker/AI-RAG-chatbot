@@ -229,6 +229,12 @@ def ingest_pdf(file_path: str) -> int:
     logger.info("Ingested '%s': %d chunks stored", path.name, len(chunks))
     return len(chunks)
 
+def delete_existing_chunks(source_file: str):
+    try:
+        supabase.table("documents").delete().eq("source_file", source_file).execute()
+    except Exception as e:
+        raise RuntimeError(f"Failed to delete existing chunks for {source_file}: {e}") from e
+
 # 4. Retrieval
 def search_documents(query: str, match_count: int = 3, match_threshold: float = 0.15):
     try:

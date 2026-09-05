@@ -4,8 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import json
-from backend.ingestion.ingestion import (generate_answer_stream, search_documents,
- generate_answer, ingest_pdf, generate_faq, extract_text_from_pdf, clean_extracted_text)
+from backend.ingestion.ingestion import (delete_existing_chunks, generate_answer_stream, search_documents,
+ generate_answer, ingest_pdf, generate_faq, extract_text_from_pdf,delete_existing_chunks, clean_extracted_text)
 from backend.ingestion.agent import ask_agent
 
 
@@ -43,6 +43,7 @@ async def upload_pdf(file: UploadFile = File(...)):
     file_path = os.path.join(upload_dir, file.filename)
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
+    delete_existing_chunks(file.filename)   # <-- add this line
     chunk_count = ingest_pdf(file_path)
     try:
         full_text = clean_extracted_text(extract_text_from_pdf(file_path))
