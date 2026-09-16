@@ -5,6 +5,7 @@ product spec sheets, pricing docs, or policy PDFs and get grounded, cited answer
 to pricing, feature, and policy questions instead of digging through documents manually.
 
 **Live demo:** https://vaishali16-maker.github.io/AI-RAG-chatbot/ 
+**Backend API:** https://ai-rag-chatbot-wxrb.onrender.com
                 
 
 ## How it works
