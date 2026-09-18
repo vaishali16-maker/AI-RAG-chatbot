@@ -8,3 +8,6 @@ ollama
 langgraph
 requests
 cohere
+langchain-core
+langchain-groq
+langchain-cohere

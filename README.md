@@ -15,6 +15,17 @@ to pricing, feature, and policy questions instead of digging through documents m
 4. Matched chunks are passed as context to an LLM (via Groq) to generate a grounded answer
 5. Answers include the cited source chunk(s) and similarity score, so users can verify against the original text
 
+### Agentic Mode (`/ask/agent`)
+A second endpoint runs the same retrieval pipeline through a LangGraph-based
+agent instead of the direct flow above:
+1. A router node (LLM call) classifies the question as needing document
+   retrieval or a direct reply — greetings and general questions skip
+   retrieval entirely
+2. If retrieval is needed, a custom LangChain retriever wraps the existing
+   Supabase `match_documents` RPC to fetch relevant chunks
+3. The LLM generates a grounded answer using LangChain's `ChatGroq`, with the
+   same "don't guess" grounding rules as the standard `/ask` endpoint
+
 ### Tested Capabilities
 Beyond basic Q&A, this system has been validated against harder query types:
 - **Multi-fact reasoning**: correctly computes derived values (e.g. discounted 
@@ -36,9 +47,10 @@ Beyond basic Q&A, this system has been validated against harder query types:
 
 ## Stack
 - **Backend:** FastAPI (Python)
-- **Embeddings:** Cohere (`embed-english-light-v3.0`)
+- **Embeddings:** Cohere (`embed-english-light-v3.0`), via `langchain-cohere`
 - **Vector store:** Supabase (pgvector)
-- **LLM:** Groq (`openai/gpt-oss-20b`)
+- **LLM:** Groq (`openai/gpt-oss-20b`), via `langchain-groq`
+- **Agent orchestration:** LangGraph (conditional routing) + a custom LangChain retriever
 - **Frontend:** Static HTML/JS, hosted on GitHub Pages
 - **Deployment:** Render (backend, free tier)
 

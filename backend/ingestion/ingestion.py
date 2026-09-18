@@ -205,12 +205,8 @@ def ingest_pdf(file_path: str) -> int:
     if not chunks:
         raise ValueError(f"'{path.name}' produced no chunks after splitting")
     try:
-        response = co.embed(
-            texts=chunks,
-            model="embed-english-light-v3.0",
-            input_type="search_document",
-        )
-        vectors = response.embeddings
+       from backend.ingestion.langchain_components import embeddings as lc_embeddings
+       vectors = lc_embeddings.embed_documents(chunks)
     except Exception as e:
         raise RuntimeError(f"Embedding failed for '{path.name}': {e}") from e
     rows = [
@@ -238,12 +234,8 @@ def delete_existing_chunks(source_file: str):
 # 4. Retrieval
 def search_documents(query: str, match_count: int = 3, match_threshold: float = 0.15):
     try:
-        response = co.embed(
-            texts=[query],
-            model="embed-english-light-v3.0",
-            input_type="search_query",
-        )
-        query_vector = response.embeddings[0]
+        from backend.ingestion.langchain_components import embeddings as lc_embeddings
+        query_vector = lc_embeddings.embed_query(query)
     except Exception as e:
         raise RuntimeError(f"Failed to embed query: {e}") from e
     try:

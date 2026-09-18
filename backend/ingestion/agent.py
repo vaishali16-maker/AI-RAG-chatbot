@@ -1,6 +1,8 @@
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, END
-from backend.ingestion.ingestion import search_documents, _call_llm
+from backend.ingestion.langchain_components import llm, SupabaseMatchRetriever
+from langchain_core.messages import HumanMessage
+retriever = SupabaseMatchRetriever()
 
 # State — this dict is passed between every node in the graph
 class RAGState(TypedDict):
@@ -31,9 +33,8 @@ Answer:"""
 # Node 1: router — decide whether this question needs document search
 def route_question(state: RAGState) -> RAGState:
     try:
-        decision = _call_llm(
-            [{"role": "user", "content": ROUTER_PROMPT.format(question=state["question"])}]
-        ).strip().lower()
+        decision = llm.invoke([HumanMessage(content=ROUTER_PROMPT.format(question=state["question"]))]
+         ).content.strip().lower()
     except Exception:
         decision = "retrieve"
     state["route"] = "direct" if "direct" in decision else "retrieve"
@@ -41,16 +42,9 @@ def route_question(state: RAGState) -> RAGState:
 
 # Node 2: retrieve — pull relevant chunks from the vector DB
 def retrieve(state: RAGState) -> RAGState:
-    results = search_documents(state["question"])
-    state["context"] = "\n".join(item["content"] for item in results)
-    state["sources"] = [
-        {
-            "source_file": r.get("source_file"),
-            "chunk_index": r.get("chunk_index"),
-            "similarity": r.get("similarity"),
-        }
-        for r in results
-    ]
+    docs = retriever.invoke(state["question"])
+    state["context"] = "\n".join(d.page_content for d in docs)
+    state["sources"] = [d.metadata for d in docs]
     return state
 
 # Node 3: generate — answer using context if present, otherwise answer plainly
@@ -80,7 +74,7 @@ def generate(state: RAGState) -> RAGState:
         state["sources"] = []
 
     try:
-        state["answer"] = _call_llm([{"role": "user", "content": prompt}])
+        state["answer"] = llm.invoke([HumanMessage(content=prompt)]).content
     except Exception as e:
         state["answer"] = f"Sorry, something went wrong generating a response: {e}"
 
