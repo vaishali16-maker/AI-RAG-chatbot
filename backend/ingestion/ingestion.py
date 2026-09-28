@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import ollama
 import requests
+from typing import Optional
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -196,43 +197,113 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[st
         chunks.append(current.strip())
     return chunks
 
-# 3. Ingestion (metadata + batch insert)
-def ingest_pdf(file_path: str) -> int:
+# 3. Ingestion (document record + linked chunks)
+VALID_ROLES = ["employee", "manager", "hr", "admin"]
+
+
+def find_documents_by_name(tenant_id: str, name: str) -> list[dict]:
+    try:
+        res = (
+            supabase.table("documents")
+            .select("id, name")
+            .eq("tenant_id", tenant_id)
+            .eq("name", name)
+            .execute()
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to look up existing document '{name}': {e}") from e
+    return res.data or []
+
+
+def ingest_pdf(
+    file_path: str,
+    tenant_id: str,
+    original_name: Optional[str] = None,
+    allowed_roles: Optional[list] = None,
+    uploaded_by: Optional[str] = None,
+) -> dict:
     path = Path(file_path)
-    text = extract_text_from_pdf(file_path)
-    text = clean_extracted_text(text)
+    name = original_name or path.name
+    text = clean_extracted_text(extract_text_from_pdf(file_path))
     chunks = chunk_text(text)
     if not chunks:
-        raise ValueError(f"'{path.name}' produced no chunks after splitting")
+        raise ValueError(f"'{name}' produced no chunks after splitting")
+
+    # Embed first, so a failed embedding never leaves an empty document record behind
     try:
-       from backend.ingestion.langchain_components import embeddings as lc_embeddings
-       vectors = lc_embeddings.embed_documents(chunks)
+        from backend.ingestion.langchain_components import embeddings as lc_embeddings
+        vectors = lc_embeddings.embed_documents(chunks)
     except Exception as e:
-        raise RuntimeError(f"Embedding failed for '{path.name}': {e}") from e
+        raise RuntimeError(f"Embedding failed for '{name}': {e}") from e
+
+    doc_row = {"tenant_id": tenant_id, "name": name}
+    if allowed_roles:
+        doc_row["allowed_roles"] = allowed_roles
+    if uploaded_by:
+        doc_row["uploaded_by"] = uploaded_by
+    try:
+        document_id = supabase.table("documents").insert(doc_row).execute().data[0]["id"]
+    except Exception as e:
+        raise RuntimeError(f"Failed to create document record for '{name}': {e}") from e
+
     rows = [
         {
+            "document_id": document_id,
+            "chunk_index": idx,
             "content": chunk,
             "embedding": vector,
-            "source_file": path.name,
-            "chunk_index": idx,
         }
         for idx, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
     try:
-        supabase.table("documents").insert(rows).execute()
+        for start in range(0, len(rows), 100):
+            supabase.table("chunks").insert(rows[start:start + 100]).execute()
     except Exception as e:
-        raise RuntimeError(f"Failed to store chunks for '{path.name}': {e}") from e
-    logger.info("Ingested '%s': %d chunks stored", path.name, len(chunks))
-    return len(chunks)
+        # roll back: deleting the document also deletes any chunks already inserted
+        supabase.table("documents").delete().eq("id", document_id).execute()
+        raise RuntimeError(f"Failed to store chunks for '{name}': {e}") from e
 
-def delete_existing_chunks(source_file: str):
+    logger.info("Ingested '%s': %d chunks stored", name, len(chunks))
+    return {"document_id": document_id, "name": name, "chunks": len(chunks)}
+
+
+def list_documents(tenant_id: str, role: str) -> list[dict]:
     try:
-        supabase.table("documents").delete().eq("source_file", source_file).execute()
+        res = (
+            supabase.table("documents")
+            .select("id, name, allowed_roles, created_at")
+            .eq("tenant_id", tenant_id)
+            .contains("allowed_roles", [role])
+            .order("created_at", desc=True)
+            .execute()
+        )
     except Exception as e:
-        raise RuntimeError(f"Failed to delete existing chunks for {source_file}: {e}") from e
+        raise RuntimeError(f"Failed to list documents: {e}") from e
+    return res.data or []
 
-# 4. Retrieval
-def search_documents(query: str, match_count: int = 3, match_threshold: float = 0.15):
+
+def delete_document(document_id: str, tenant_id: str) -> bool:
+    try:
+        res = (
+            supabase.table("documents")
+            .delete()
+            .eq("id", document_id)
+            .eq("tenant_id", tenant_id)
+            .execute()
+        )
+    except Exception as e:
+        raise RuntimeError(f"Failed to delete document {document_id}: {e}") from e
+    return bool(res.data)
+
+
+# 4. Retrieval (always scoped to a tenant and role)
+def search_documents(
+    query: str,
+    tenant_id: str,
+    role: str,
+    match_count: int = 3,
+    match_threshold: float = 0.15,
+):
     try:
         from backend.ingestion.langchain_components import embeddings as lc_embeddings
         query_vector = lc_embeddings.embed_query(query)
@@ -240,16 +311,21 @@ def search_documents(query: str, match_count: int = 3, match_threshold: float = 
         raise RuntimeError(f"Failed to embed query: {e}") from e
     try:
         result = supabase.rpc(
-            "match_documents",
+            "match_chunks",
             {
                 "query_embedding": query_vector,
                 "match_threshold": match_threshold,
                 "match_count": match_count,
+                "p_tenant_id": tenant_id,
+                "p_role": role,
             },
         ).execute()
     except Exception as e:
         raise RuntimeError(f"Vector search failed: {e}") from e
-    return result.data or []
+    rows = result.data or []
+    for r in rows:
+        r["source_file"] = r.get("document_name")  # keeps the existing frontend working
+    return rows
 
 
 # 5. Generation

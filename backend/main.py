@@ -1,16 +1,30 @@
 import os
-from fastapi import FastAPI, Request, UploadFile, File
+import json
+import uuid
+from dataclasses import dataclass
+from typing import Optional
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import json
-from backend.ingestion.ingestion import (delete_existing_chunks, generate_answer_stream, search_documents,
- generate_answer, ingest_pdf, generate_faq, extract_text_from_pdf,delete_existing_chunks, clean_extracted_text)
+
+from backend.ingestion.ingestion import (
+    VALID_ROLES,
+    search_documents,
+    generate_answer,
+    generate_answer_stream,
+    generate_faq,
+    ingest_pdf,
+    extract_text_from_pdf,
+    clean_extracted_text,
+    find_documents_by_name,
+    list_documents,
+    delete_document,
+)
 from backend.ingestion.agent import ask_agent
 
-
-
-app = FastAPI(title="AI Document Search API")
+app = FastAPI(title="Enterprise Knowledge Assistant API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -22,63 +36,119 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 class Question(BaseModel):
     question: str
 
-# API endpoint to ask a question to the agent
-@app.post("/ask/agent")
-def ask_agent_route(data: Question):
-    return ask_agent(data.question)
 
-# API endpoint to check if the API is running
+@dataclass
+class CurrentUser:
+    tenant_id: str
+    role: str
+    user_id: Optional[str] = None
+
+
+def get_current_user() -> CurrentUser:
+    # PHASE 1: temporary fixed identity from .env.
+    # PHASE 2 replaces the body of this function with Supabase token verification.
+    tenant_id = os.environ.get("DEFAULT_TENANT_ID")
+    if not tenant_id:
+        raise HTTPException(status_code=500, detail="DEFAULT_TENANT_ID is not set in .env")
+    return CurrentUser(tenant_id=tenant_id, role=os.environ.get("DEFAULT_ROLE", "admin"))
+
+
 @app.get("/")
 def home():
-    return {"message": "AI Document Search API is running"}
+    return {"message": "Enterprise Knowledge Assistant API is running"}
 
-# API endpoint to upload a PDF and index it
+
+@app.get("/documents")
+def get_documents(user: CurrentUser = Depends(get_current_user)):
+    return {"documents": list_documents(user.tenant_id, user.role)}
+
+
+@app.delete("/documents/{document_id}")
+def remove_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    if not delete_document(document_id, user.tenant_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"message": "Document deleted"}
+
+
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    allowed_roles: str = Form(""),
+    user: CurrentUser = Depends(get_current_user),
+):
+    display_name = os.path.basename(file.filename or "")
+    if not display_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    roles = [r.strip().lower() for r in allowed_roles.split(",") if r.strip()]
+    bad_roles = [r for r in roles if r not in VALID_ROLES]
+    if bad_roles:
+        raise HTTPException(status_code=400, detail=f"Unknown role(s): {', '.join(bad_roles)}")
+
     upload_dir = "backend/ingestion/uploads"
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
+    file_path = os.path.join(upload_dir, f"{uuid.uuid4().hex}.pdf")  # never trust the user's filename on disk
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
-    delete_existing_chunks(file.filename)   # <-- add this line
-    chunk_count = ingest_pdf(file_path)
+
     try:
-        full_text = clean_extracted_text(extract_text_from_pdf(file_path))
-        suggested_questions = generate_faq(full_text)
-    except Exception:
-        suggested_questions = []
+        old_ids = [d["id"] for d in find_documents_by_name(user.tenant_id, display_name)]
+        result = ingest_pdf(
+            file_path,
+            tenant_id=user.tenant_id,
+            original_name=display_name,
+            allowed_roles=roles or None,
+            uploaded_by=user.user_id,
+        )
+        for old_id in old_ids:  # replace older copies only after the new one succeeded
+            delete_document(old_id, user.tenant_id)
+        try:
+            full_text = clean_extracted_text(extract_text_from_pdf(file_path))
+            suggested_questions = generate_faq(full_text)
+        except Exception:
+            suggested_questions = []
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
     return {
-        "filename": file.filename,
-        "chunks": chunk_count,
+        "document_id": result["document_id"],
+        "filename": result["name"],
+        "chunks": result["chunks"],
         "message": "PDF uploaded and indexed successfully",
-        "suggested_questions": suggested_questions
+        "suggested_questions": suggested_questions,
     }
 
-# API endpoint to ask a question and get an answer
+
 @app.post("/ask")
-def ask_question(data: Question):
-    results = search_documents(data.question)
+def ask_question(data: Question, user: CurrentUser = Depends(get_current_user)):
+    results = search_documents(data.question, user.tenant_id, user.role)
     context = "\n".join(item["content"] for item in results)
     answer = generate_answer(data.question, context)
-    return {
-        "question": data.question,
-        "answer": answer,
-        "sources": results
-    }
-# API endpoint to ask a question and stream the answer
+    return {"question": data.question, "answer": answer, "sources": results}
+
+
+@app.post("/ask/agent")
+def ask_agent_route(data: Question, user: CurrentUser = Depends(get_current_user)):
+    return ask_agent(data.question, user.tenant_id, user.role)
+
+
 @app.post("/ask/stream")
-def ask_stream(data: Question):
-    from backend.ingestion.ingestion import search_documents  # local import to avoid circulars
-    results = search_documents(data.question)
+def ask_stream(data: Question, user: CurrentUser = Depends(get_current_user)):
+    results = search_documents(data.question, user.tenant_id, user.role)
     if not results:
         def empty_gen():
             yield "data: I could not find the answer in the document.\n\n"
         return StreamingResponse(empty_gen(), media_type="text/event-stream")
     context = "\n".join(item["content"] for item in results)
- 
+
     def event_gen():
         sources_payload = json.dumps(
             [
@@ -95,5 +165,5 @@ def ask_stream(data: Question):
             safe_token = token.replace("\n", "\\n")
             yield f"data: {safe_token}\n\n"
         yield "event: done\ndata: {}\n\n"
+
     return StreamingResponse(event_gen(), media_type="text/event-stream")
- 

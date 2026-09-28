@@ -20,22 +20,28 @@ llm = ChatGroq(
 
 
 class SupabaseMatchRetriever(BaseRetriever):
-    """LangChain-compatible retriever wrapping our existing
-    Supabase match_documents RPC (keeps match_threshold support
-    that the built-in SupabaseVectorStore doesn't expose)."""
+    """LangChain retriever wrapping the Supabase match_chunks RPC.
+    Every search is scoped to one tenant and role."""
 
+    tenant_id: str
+    role: str
     match_count: int = 3
     match_threshold: float = 0.15
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
         from backend.ingestion.ingestion import search_documents  # local import avoids circulars
         results = search_documents(
-            query, match_count=self.match_count, match_threshold=self.match_threshold
+            query,
+            tenant_id=self.tenant_id,
+            role=self.role,
+            match_count=self.match_count,
+            match_threshold=self.match_threshold,
         )
         return [
             Document(
                 page_content=r["content"],
                 metadata={
+                    "document_id": r.get("document_id"),
                     "source_file": r.get("source_file"),
                     "chunk_index": r.get("chunk_index"),
                     "similarity": r.get("similarity"),

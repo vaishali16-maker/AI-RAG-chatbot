@@ -2,15 +2,18 @@ from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, END
 from backend.ingestion.langchain_components import llm, SupabaseMatchRetriever
 from langchain_core.messages import HumanMessage
-retriever = SupabaseMatchRetriever()
+
 
 # State — this dict is passed between every node in the graph
 class RAGState(TypedDict):
     question: str
+    tenant_id: str
+    role: str
     route: Literal["retrieve", "direct"]
     context: str
     sources: list
     answer: str
+    
 
 # Node 1: route — decide whether this question needs document search
 ROUTER_PROMPT = """You are a router for a document Q&A assistant.
@@ -42,6 +45,7 @@ def route_question(state: RAGState) -> RAGState:
 
 # Node 2: retrieve — pull relevant chunks from the vector DB
 def retrieve(state: RAGState) -> RAGState:
+    retriever = SupabaseMatchRetriever(tenant_id=state["tenant_id"], role=state["role"])
     docs = retriever.invoke(state["question"])
     state["context"] = "\n".join(d.page_content for d in docs)
     state["sources"] = [d.metadata for d in docs]
@@ -96,8 +100,8 @@ def build_graph():
 rag_agent = build_graph()
 
 # Entry point for the FastAPI route
-def ask_agent(question: str) -> dict:
-    result = rag_agent.invoke({"question": question})
+def ask_agent(question: str, tenant_id: str, role: str) -> dict:
+    result = rag_agent.invoke({"question": question, "tenant_id": tenant_id, "role": role})
     return {
         "question": question,
         "route": result["route"],
@@ -106,5 +110,6 @@ def ask_agent(question: str) -> dict:
     }
 
 if __name__ == "__main__":
+    import os
     q = input("Ask something: ")
-    print(ask_agent(q))
+    print(ask_agent(q, os.environ["DEFAULT_TENANT_ID"], os.environ.get("DEFAULT_ROLE", "admin")))
