@@ -174,9 +174,9 @@ def extract_text_from_pdf(file_path: str,skip_structural_pages: bool = True,) ->
 
 # 2. Cleanup + Chunking (sentence-boundary, with overlap)
 def clean_extracted_text(text: str) -> str:
-    text = re.sub(r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]', '', text)
-    text = re.sub(r'[•·.]{3,}', ' ', text)
-    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]', '', text)#emoijes and symbols-empty string
+    text = re.sub(r'[•·.]{3,}', ' ', text)#replace 3 or more bullet points or dots with a single space
+    text = re.sub(r'\s+', ' ', text)#1 or more whitespace characters with a single space
     return text.strip()
 
 
