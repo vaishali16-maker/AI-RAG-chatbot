@@ -1,13 +1,11 @@
 import os
 import json
 import uuid
-from dataclasses import dataclass
-from typing import Optional
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from backend.auth import CurrentUser, get_current_user, require_roles
 
 from backend.ingestion.ingestion import (
     VALID_ROLES,
@@ -31,6 +29,7 @@ app.add_middleware(
         "https://vaishali16-maker.github.io",
         "http://127.0.0.1:5500",
         "http://127.0.0.1:8000",
+        "http://localhost:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -41,21 +40,6 @@ app.add_middleware(
 class Question(BaseModel):
     question: str
 
-
-@dataclass
-class CurrentUser:
-    tenant_id: str
-    role: str
-    user_id: Optional[str] = None
-
-
-def get_current_user() -> CurrentUser:
-    # PHASE 1: temporary fixed identity from .env.
-    # PHASE 2 replaces the body of this function with Supabase token verification.
-    tenant_id = os.environ.get("DEFAULT_TENANT_ID")
-    if not tenant_id:
-        raise HTTPException(status_code=500, detail="DEFAULT_TENANT_ID is not set in .env")
-    return CurrentUser(tenant_id=tenant_id, role=os.environ.get("DEFAULT_ROLE", "admin"))
 
 
 @app.get("/")
@@ -69,7 +53,7 @@ def get_documents(user: CurrentUser = Depends(get_current_user)):
 
 
 @app.delete("/documents/{document_id}")
-def remove_document(document_id: str, user: CurrentUser = Depends(get_current_user)):
+def remove_document(document_id: str, user: CurrentUser = Depends(require_roles("admin", "hr"))):
     if not delete_document(document_id, user.tenant_id):
         raise HTTPException(status_code=404, detail="Document not found")
     return {"message": "Document deleted"}
@@ -79,7 +63,7 @@ def remove_document(document_id: str, user: CurrentUser = Depends(get_current_us
 async def upload_pdf(
     file: UploadFile = File(...),
     allowed_roles: str = Form(""),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(require_roles("admin", "hr")),
 ):
     display_name = os.path.basename(file.filename or "")
     if not display_name.lower().endswith(".pdf"):
@@ -89,6 +73,8 @@ async def upload_pdf(
     bad_roles = [r for r in roles if r not in VALID_ROLES]
     if bad_roles:
         raise HTTPException(status_code=400, detail=f"Unknown role(s): {', '.join(bad_roles)}")
+    if roles:
+       roles = sorted(set(roles) | {"admin"})
 
     upload_dir = "backend/ingestion/uploads"
     os.makedirs(upload_dir, exist_ok=True)
@@ -126,6 +112,9 @@ async def upload_pdf(
         "suggested_questions": suggested_questions,
     }
 
+@app.get("/me")
+def me(user: CurrentUser = Depends(get_current_user)):
+       return {"email": user.email, "role": user.role, "tenant_id": user.tenant_id}
 
 @app.post("/ask")
 def ask_question(data: Question, user: CurrentUser = Depends(get_current_user)):
