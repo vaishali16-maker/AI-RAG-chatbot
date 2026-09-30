@@ -21,13 +21,31 @@ load_dotenv(BASE_DIR / ".env")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in your .env file" )
+    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in your .env file")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 co = cohere.Client(os.environ.get("COHERE_API_KEY"))
 EMBED_MODEL_NAME = "qwen3.5:4b"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "openai/gpt-oss-20b"
+GROQ_MODEL_SMALL = "llama-3.1-8b-instant"  # faster/cheaper than gpt-oss-20b
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+def _call_llm_with_model(messages: list[dict], model: str) -> str:
+    if GROQ_API_KEY:
+        try:
+            resp = requests.post(
+                GROQ_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                json={"model": model, "messages": messages, "reasoning_format": "hidden"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        except Exception as e:
+            raise RuntimeError(f"Groq generation failed: {e}") from e
+    return _call_llm(messages)  # fallback to Ollama path if no Groq key
 
 
 def _call_llm(messages: list[dict]) -> str:
@@ -103,6 +121,7 @@ def _call_llm_stream(messages: list[dict]):
         except Exception as e:
             yield f"[error: Ollama generation failed — {e}]"
 
+
 # 1. Extraction (layout-aware, with TOC-page filtering)
 def _order_blocks_by_column(blocks: list, page_width: float) -> list:
     full_width_threshold = 0.6 * page_width
@@ -139,7 +158,7 @@ def _is_structural_page(block_texts: list[str]) -> bool:
     return long_blocks == 0 and (short_blocks / len(blocks)) > 0.6
 
 
-def extract_text_from_pdf(file_path: str,skip_structural_pages: bool = True,) -> str:
+def extract_text_from_pdf(file_path: str, skip_structural_pages: bool = True) -> str:
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"No file found at {file_path}")
@@ -173,11 +192,12 @@ def extract_text_from_pdf(file_path: str,skip_structural_pages: bool = True,) ->
         )
     return full_text
 
+
 # 2. Cleanup + Chunking (sentence-boundary, with overlap)
 def clean_extracted_text(text: str) -> str:
-    text = re.sub(r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]', '', text)#emoijes and symbols-empty string
-    text = re.sub(r'[•·.]{3,}', ' ', text)#replace 3 or more bullet points or dots with a single space
-    text = re.sub(r'\s+', ' ', text)#1 or more whitespace characters with a single space
+    text = re.sub(r'[\U0001F300-\U0001FAFF\U00002600-\U000027BF]', '', text)  # emojis and symbols -> empty string
+    text = re.sub(r'[•·.]{3,}', ' ', text)  # replace 3+ bullet points/dots with a single space
+    text = re.sub(r'\s+', ' ', text)  # collapse whitespace
     return text.strip()
 
 
@@ -196,6 +216,7 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[st
     if current.strip():
         chunks.append(current.strip())
     return chunks
+
 
 # 3. Ingestion (document record + linked chunks)
 VALID_ROLES = ["employee", "manager", "hr", "admin"]
@@ -229,7 +250,6 @@ def ingest_pdf(
     if not chunks:
         raise ValueError(f"'{name}' produced no chunks after splitting")
 
-    # Embed first, so a failed embedding never leaves an empty document record behind
     try:
         from backend.ingestion.langchain_components import embeddings as lc_embeddings
         vectors = lc_embeddings.embed_documents(chunks)
@@ -259,7 +279,6 @@ def ingest_pdf(
         for start in range(0, len(rows), 100):
             supabase.table("chunks").insert(rows[start:start + 100]).execute()
     except Exception as e:
-        # roll back: deleting the document also deletes any chunks already inserted
         supabase.table("documents").delete().eq("id", document_id).execute()
         raise RuntimeError(f"Failed to store chunks for '{name}': {e}") from e
 
@@ -328,6 +347,73 @@ def search_documents(
     return rows
 
 
+# 4b. Semantic cache
+def check_cache(question: str, tenant_id: str, threshold: float = 0.95):
+    try:
+        from backend.ingestion.langchain_components import embeddings as lc_embeddings
+        query_vector = lc_embeddings.embed_query(question)
+    except Exception:
+        return None
+    try:
+        result = supabase.rpc(
+            "match_cached_query",
+            {
+                "query_embedding": query_vector,
+                "p_tenant_id": tenant_id,
+                "match_threshold": threshold,
+            },
+        ).execute()
+    except Exception:
+        return None
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def store_cache(question: str, tenant_id: str, answer: str, sources: list):
+    try:
+        from backend.ingestion.langchain_components import embeddings as lc_embeddings
+        query_vector = lc_embeddings.embed_query(question)
+        supabase.table("query_cache").insert(
+            {
+                "tenant_id": tenant_id,
+                "question": question,
+                "embedding": query_vector,
+                "answer": answer,
+                "sources": sources,
+            }
+        ).execute()
+    except Exception as e:
+        logger.warning("Failed to store cache entry: %s", e)
+
+
+def log_request(tenant_id, user_id, question, cache_hit, model, latency_ms):
+    try:
+        supabase.table("request_log").insert(
+            {
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "question": question,
+                "cache_hit": cache_hit,
+                "model": model,
+                "latency_ms": latency_ms,
+            }
+        ).execute()
+    except Exception as e:
+        logger.warning("Failed to log request: %s", e)
+
+
+def is_simple_question(question: str) -> bool:
+    """Cheap heuristic router: short, single-fact-looking questions -> small model."""
+    q = question.strip().lower()
+    word_count = len(q.split())
+    complex_signals = ["compare", "difference", "why", "explain", "summarize", "and", "vs"]
+    if word_count > 15:
+        return False
+    if any(sig in q for sig in complex_signals):
+        return False
+    return True
+
+
 # 5. Generation
 def generate_answer(query: str, context: str) -> str:
     system_prompt = f"""You are an AI document assistant.
@@ -344,6 +430,21 @@ Context:{context}
 Question:{query}
 Answer:"""
     return _call_llm([{"role": "user", "content": system_prompt}])
+
+
+def generate_answer_routed(query: str, context: str, use_small_model: bool) -> str:
+    system_prompt = f"""You are an AI document assistant.
+Answer the user's question using ONLY the information provided in the context.
+Rules:
+- Give a clear, complete answer in a natural sentence.
+- Do not add information that is not present in the context.
+- If the answer is not present in the context, say:
+"I could not find the answer in the document."
+Context:{context}
+Question:{query}
+Answer:"""
+    model = GROQ_MODEL_SMALL if use_small_model else GROQ_MODEL
+    return _call_llm_with_model([{"role": "user", "content": system_prompt}], model)
 
 
 def generate_answer_stream(query: str, context: str):
@@ -377,10 +478,10 @@ def _sample_text(text: str, max_chars: int = 4000) -> str:
 
 def generate_faq(text: str, num_questions: int = 4) -> list[dict]:
     excerpt = _sample_text(text, max_chars=4000)
-    prompt = f"""You are helping a salesperson quickly understand a product document.
+    prompt = f"""You are helping someone quickly understand a company document.
 Read the document excerpt below and write {num_questions} short, realistic questions
-a salesperson or customer might ask about it (e.g. pricing, features, policies,
-integrations, support), each with a concise, accurate answer based ONLY on the text.
+an employee might ask about it (e.g. policies, procedures, benefits, deadlines),
+each with a concise, accurate answer based ONLY on the text.
 
 Respond with ONLY a JSON array, no other text, no markdown code fences, in this exact shape:
 [{{"question": "...", "answer": "..."}}, ...]
@@ -407,9 +508,14 @@ JSON array:"""
         )
         return []
 
-# Main (CLI)
+
+# Main (CLI) — uses env defaults, matching the /docs testing setup
 def ask(query: str) -> str:
-    results = search_documents(query)
+    tenant_id = os.environ.get("DEFAULT_TENANT_ID")
+    role = os.environ.get("DEFAULT_ROLE", "admin")
+    if not tenant_id:
+        return "DEFAULT_TENANT_ID is not set in .env — cannot run CLI query."
+    results = search_documents(query, tenant_id=tenant_id, role=role)
     if not results:
         return "I could not find the answer in the document."
     context = "\n".join(item["content"] for item in results)

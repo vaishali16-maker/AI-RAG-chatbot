@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from backend.auth import CurrentUser, get_current_user, require_roles
 from datetime import datetime
 from backend.ingestion.ingestion import supabase
-
+import time
 from backend.ingestion.ingestion import (
     VALID_ROLES,
     search_documents,
@@ -21,6 +21,10 @@ from backend.ingestion.ingestion import (
     find_documents_by_name,
     list_documents,
     delete_document,
+    check_cache, 
+    store_cache, 
+    log_request, 
+    is_simple_question
 )
 from backend.ingestion.agent import ask_agent
 
@@ -164,7 +168,9 @@ class AskWithHistory(Question):
 
 
 @app.post("/ask/chat")
+@app.post("/ask/chat")
 def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)):
+    start = time.time()
     conv_id = data.conversation_id
     if not conv_id:
         title = data.question[:60]
@@ -179,18 +185,36 @@ def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)
         {"conversation_id": conv_id, "role": "user", "content": data.question}
     ).execute()
 
-    result = ask_agent(data.question, user.tenant_id, user.role)
+    cached = check_cache(data.question, user.tenant_id)
+    if cached:
+        answer, sources = cached["answer"], cached.get("sources") or []
+        model_used = "cache"
+    else:
+        model_used = "small" if is_simple_question(data.question) else "standard"
+        result = ask_agent(data.question, user.tenant_id, user.role)
+        answer, sources = result["answer"], result.get("sources", [])
+        store_cache(data.question, user.tenant_id, answer, sources)
+
+    latency_ms = int((time.time() - start) * 1000)
+    log_request(user.tenant_id, user.user_id, data.question, bool(cached), model_used, latency_ms)
 
     supabase.table("messages").insert(
         {
             "conversation_id": conv_id,
             "role": "assistant",
-            "content": result["answer"],
-            "sources": result.get("sources", []),
+            "content": answer,
+            "sources": sources,
         }
     ).execute()
 
-    return {**result, "conversation_id": conv_id}
+    return {
+        "question": data.question,
+        "answer": answer,
+        "sources": sources,
+        "conversation_id": conv_id,
+        "cache_hit": bool(cached),
+        "model": model_used,
+    }
 
 
 @app.post("/ask/agent")
