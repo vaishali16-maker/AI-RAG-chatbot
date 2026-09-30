@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.auth import CurrentUser, get_current_user, require_roles
+from datetime import datetime
+from backend.ingestion.ingestion import supabase
 
 from backend.ingestion.ingestion import (
     VALID_ROLES,
@@ -122,6 +124,73 @@ def ask_question(data: Question, user: CurrentUser = Depends(get_current_user)):
     context = "\n".join(item["content"] for item in results)
     answer = generate_answer(data.question, context)
     return {"question": data.question, "answer": answer, "sources": results}
+
+@app.get("/conversations")
+def list_conversations(user: CurrentUser = Depends(get_current_user)):
+    res = (
+        supabase.table("conversations")
+        .select("id, title, created_at")
+        .eq("user_id", user.user_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return {"conversations": res.data or []}
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def get_messages(conversation_id: str, user: CurrentUser = Depends(get_current_user)):
+    convo = (
+        supabase.table("conversations")
+        .select("id")
+        .eq("id", conversation_id)
+        .eq("user_id", user.user_id)
+        .execute()
+        .data
+    )
+    if not convo:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    res = (
+        supabase.table("messages")
+        .select("role, content, sources, created_at")
+        .eq("conversation_id", conversation_id)
+        .order("id")
+        .execute()
+    )
+    return {"messages": res.data or []}
+
+
+class AskWithHistory(Question):
+    conversation_id: str | None = None
+
+
+@app.post("/ask/chat")
+def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)):
+    conv_id = data.conversation_id
+    if not conv_id:
+        title = data.question[:60]
+        conv_id = (
+            supabase.table("conversations")
+            .insert({"user_id": user.user_id, "title": title})
+            .execute()
+            .data[0]["id"]
+        )
+
+    supabase.table("messages").insert(
+        {"conversation_id": conv_id, "role": "user", "content": data.question}
+    ).execute()
+
+    result = ask_agent(data.question, user.tenant_id, user.role)
+
+    supabase.table("messages").insert(
+        {
+            "conversation_id": conv_id,
+            "role": "assistant",
+            "content": result["answer"],
+            "sources": result.get("sources", []),
+        }
+    ).execute()
+
+    return {**result, "conversation_id": conv_id}
 
 
 @app.post("/ask/agent")

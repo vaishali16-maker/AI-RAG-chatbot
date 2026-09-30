@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-slate-50 text-slate-900 antialiased">
+      <body className="min-h-screen bg-gradient-to-br from-[#f3e5d3] via-[#e8d3b8] to-[#d4b896] text-slate-900 antialiased">
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
