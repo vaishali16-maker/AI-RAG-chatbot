@@ -1,18 +1,18 @@
 import os
 import json
 import uuid
+import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.auth import CurrentUser, get_current_user, require_roles
-from datetime import datetime
-from backend.ingestion.ingestion import supabase
-import time
 from backend.ingestion.ingestion import (
+    supabase,
     VALID_ROLES,
     search_documents,
     generate_answer,
+    generate_answer_routed,
     generate_answer_stream,
     generate_faq,
     ingest_pdf,
@@ -21,10 +21,10 @@ from backend.ingestion.ingestion import (
     find_documents_by_name,
     list_documents,
     delete_document,
-    check_cache, 
-    store_cache, 
-    log_request, 
-    is_simple_question
+    check_cache,
+    store_cache,
+    log_request,
+    is_simple_question,
 )
 from backend.ingestion.agent import ask_agent
 
@@ -47,10 +47,40 @@ class Question(BaseModel):
     question: str
 
 
+class AskWithHistory(Question):
+    conversation_id: str | None = None
+
 
 @app.get("/")
 def home():
     return {"message": "Enterprise Knowledge Assistant API is running"}
+
+
+@app.get("/me")
+def me(user: CurrentUser = Depends(get_current_user)):
+    return {"email": user.email, "role": user.role, "tenant_id": user.tenant_id}
+
+
+@app.get("/stats")
+def get_stats(user: CurrentUser = Depends(get_current_user)):
+    res = (
+        supabase.table("request_log")
+        .select("cache_hit, model, latency_ms")
+        .eq("tenant_id", user.tenant_id)
+        .order("id", desc=True)
+        .limit(200)
+        .execute()
+    )
+    rows = res.data or []
+    total = len(rows)
+    hits = sum(1 for r in rows if r["cache_hit"])
+    avg_latency = int(sum(r["latency_ms"] or 0 for r in rows) / total) if total else 0
+    return {
+        "total_requests": total,
+        "cache_hits": hits,
+        "cache_hit_rate": round(hits / total, 3) if total else 0,
+        "avg_latency_ms": avg_latency,
+    }
 
 
 @app.get("/documents")
@@ -80,11 +110,11 @@ async def upload_pdf(
     if bad_roles:
         raise HTTPException(status_code=400, detail=f"Unknown role(s): {', '.join(bad_roles)}")
     if roles:
-       roles = sorted(set(roles) | {"admin"})
+        roles = sorted(set(roles) | {"admin"})
 
     upload_dir = "backend/ingestion/uploads"
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, f"{uuid.uuid4().hex}.pdf")  # never trust the user's filename on disk
+    file_path = os.path.join(upload_dir, f"{uuid.uuid4().hex}.pdf")
     with open(file_path, "wb") as buffer:
         buffer.write(await file.read())
 
@@ -97,7 +127,7 @@ async def upload_pdf(
             allowed_roles=roles or None,
             uploaded_by=user.user_id,
         )
-        for old_id in old_ids:  # replace older copies only after the new one succeeded
+        for old_id in old_ids:
             delete_document(old_id, user.tenant_id)
         try:
             full_text = clean_extracted_text(extract_text_from_pdf(file_path))
@@ -118,9 +148,6 @@ async def upload_pdf(
         "suggested_questions": suggested_questions,
     }
 
-@app.get("/me")
-def me(user: CurrentUser = Depends(get_current_user)):
-       return {"email": user.email, "role": user.role, "tenant_id": user.tenant_id}
 
 @app.post("/ask")
 def ask_question(data: Question, user: CurrentUser = Depends(get_current_user)):
@@ -128,6 +155,7 @@ def ask_question(data: Question, user: CurrentUser = Depends(get_current_user)):
     context = "\n".join(item["content"] for item in results)
     answer = generate_answer(data.question, context)
     return {"question": data.question, "answer": answer, "sources": results}
+
 
 @app.get("/conversations")
 def list_conversations(user: CurrentUser = Depends(get_current_user)):
@@ -163,11 +191,6 @@ def get_messages(conversation_id: str, user: CurrentUser = Depends(get_current_u
     return {"messages": res.data or []}
 
 
-class AskWithHistory(Question):
-    conversation_id: str | None = None
-
-
-@app.post("/ask/chat")
 @app.post("/ask/chat")
 def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)):
     start = time.time()
@@ -191,8 +214,10 @@ def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)
         model_used = "cache"
     else:
         model_used = "small" if is_simple_question(data.question) else "standard"
-        result = ask_agent(data.question, user.tenant_id, user.role)
-        answer, sources = result["answer"], result.get("sources", [])
+        results = search_documents(data.question, user.tenant_id, user.role)
+        context = "\n".join(item["content"] for item in results)
+        answer = generate_answer_routed(data.question, context, use_small_model=(model_used == "small"))
+        sources = results
         store_cache(data.question, user.tenant_id, answer, sources)
 
     latency_ms = int((time.time() - start) * 1000)

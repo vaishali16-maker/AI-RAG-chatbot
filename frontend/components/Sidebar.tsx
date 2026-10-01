@@ -1,16 +1,26 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useConversations } from "@/lib/conversations";
 
 export function Sidebar() {
-  const { user, role, signOut } = useAuth();
+  const { user, role, signOut, apiFetch } = useAuth();
   const { conversations, loading } = useConversations();
   const pathname = usePathname();
   const router = useRouter();
 
+  const [stats, setStats] = useState<{ cache_hit_rate: number; avg_latency_ms: number; total_requests: number } | null>(null);
+
+  useEffect(() => {
+  apiFetch("/stats").then(r => r.json()).then(setStats).catch(() => {});
+  const interval = setInterval(() => {
+    apiFetch("/stats").then(r => r.json()).then(setStats).catch(() => {});
+  }, 5000);
+  return () => clearInterval(interval);
+}, []);
   const activeConvoId =
     typeof window !== "undefined"
       ? new URLSearchParams(window.location.search).get("conversation")
@@ -77,8 +87,16 @@ export function Sidebar() {
               </li>
             ))}
           </ul>
-        )}
+         )}
       </div>
+
+      {/* Stats */}
+      {stats && stats.total_requests > 0 && (
+        <div className="mb-2 rounded-2xl bg-[#f3e5d3]/60 px-3 py-2 text-xs text-[#6b5744]">
+          <p>{stats.total_requests} requests · {Math.round(stats.cache_hit_rate * 100)}% cached</p>
+          <p>avg {stats.avg_latency_ms}ms</p>
+        </div>
+      )}
 
       {/* User profile, pinned bottom */}
       <div className="mt-2 border-t border-[#e8d3b8] pt-2">
