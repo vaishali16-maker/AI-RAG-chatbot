@@ -249,7 +249,6 @@ def ingest_pdf(
     chunks = chunk_text(text)
     if not chunks:
         raise ValueError(f"'{name}' produced no chunks after splitting")
-
     try:
         from backend.ingestion.langchain_components import embeddings as lc_embeddings
         vectors = lc_embeddings.embed_documents(chunks)
@@ -283,8 +282,26 @@ def ingest_pdf(
         raise RuntimeError(f"Failed to store chunks for '{name}': {e}") from e
 
     logger.info("Ingested '%s': %d chunks stored", name, len(chunks))
+    extract_graph(document_id, text)
+    upload_pdf_to_storage(document_id, file_path)
     return {"document_id": document_id, "name": name, "chunks": len(chunks)}
 
+def upload_pdf_to_storage(document_id: str, file_path: str):
+    try:
+        with open(file_path, "rb") as f:
+            supabase.storage.from_("documents").upload(
+                f"{document_id}.pdf", f, {"content-type": "application/pdf"}
+            )
+    except Exception as e:
+        logger.warning("Failed to store PDF for %s: %s", document_id, e)
+
+
+def get_pdf_url(document_id: str) -> Optional[str]:
+    try:
+        res = supabase.storage.from_("documents").create_signed_url(f"{document_id}.pdf", 3600)
+        return res.get("signedURL") or res.get("signed_url")
+    except Exception:
+        return None
 
 def list_documents(tenant_id: str, role: str) -> list[dict]:
     try:
@@ -508,6 +525,55 @@ JSON array:"""
         )
         return []
 
+def extract_graph(document_id: str, text: str):
+    excerpt = _sample_text(text, max_chars=6000)
+    prompt = f"""Extract key entities and relationships from this document excerpt.
+Respond with ONLY a JSON object, no other text:
+{{"entities": [{{"name": "...", "type": "..."}}],
+  "relations": [{{"source": "...", "relation": "...", "target": "..."}}]}}
+Keep it to the 10-15 most important entities/relations.
+Document excerpt:{excerpt}
+JSON:"""
+    try:
+        raw = _call_llm([{"role": "user", "content": prompt}])
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
+        data = json.loads(raw)
+        name_to_id = {}
+        for e in data.get("entities", []):
+            row = supabase.table("entities").insert(
+                {"document_id": document_id, "name": e["name"], "type": e.get("type")}
+            ).execute().data[0]
+            name_to_id[e["name"]] = row["id"]
+        for r in data.get("relations", []):
+            src, tgt = name_to_id.get(r["source"]), name_to_id.get(r["target"])
+            if src and tgt:
+                supabase.table("relations").insert(
+                    {"document_id": document_id, "source_entity_id": src,
+                     "target_entity_id": tgt, "relation": r["relation"]}
+                ).execute()
+    except Exception as e:
+        logger.warning("Graph extraction failed: %s", e)
+
+
+def expand_graph_context(document_ids: list[str], question: str) -> str:
+    if not document_ids:
+        return ""
+    try:
+        rels = (
+            supabase.table("relations")
+            .select("relation, source_entity_id, target_entity_id")
+            .in_("document_id", document_ids)
+            .execute().data or []
+        )
+        ent_ids = {r["source_entity_id"] for r in rels} | {r["target_entity_id"] for r in rels}
+        if not ent_ids:
+            return ""
+        ents = {e["id"]: e["name"] for e in supabase.table("entities").select("id, name").in_("id", list(ent_ids)).execute().data or []}
+        facts = [f"{ents.get(r['source_entity_id'],'?')} {r['relation']} {ents.get(r['target_entity_id'],'?')}" for r in rels]
+        return "\nRelated facts:\n" + "\n".join(facts[:15])
+    except Exception:
+        return ""
+
 
 # Main (CLI) — uses env defaults, matching the /docs testing setup
 def ask(query: str) -> str:
@@ -520,6 +586,7 @@ def ask(query: str) -> str:
         return "I could not find the answer in the document."
     context = "\n".join(item["content"] for item in results)
     return generate_answer(query, context)
+
 
 
 if __name__ == "__main__":

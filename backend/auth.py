@@ -1,13 +1,9 @@
 from dataclasses import dataclass
 from typing import Optional
-
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
 from backend.ingestion.ingestion import supabase
-
 bearer = HTTPBearer(auto_error=False)
-
 
 @dataclass
 class CurrentUser:
@@ -15,7 +11,6 @@ class CurrentUser:
     tenant_id: str
     role: str
     email: Optional[str] = None
-
 
 def get_current_user(
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer),

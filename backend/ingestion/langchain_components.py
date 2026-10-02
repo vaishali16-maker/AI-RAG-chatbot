@@ -18,18 +18,14 @@ llm = ChatGroq(
     temperature=0,
 )
 
-
 class SupabaseMatchRetriever(BaseRetriever):
-    """LangChain retriever wrapping the Supabase match_chunks RPC.
-    Every search is scoped to one tenant and role."""
-
     tenant_id: str
     role: str
     match_count: int = 3
     match_threshold: float = 0.15
 
     def _get_relevant_documents(self, query: str) -> List[Document]:
-        from backend.ingestion.ingestion import search_documents  # local import avoids circulars
+        from backend.ingestion.ingestion import search_documents  
         results = search_documents(
             query,
             tenant_id=self.tenant_id,

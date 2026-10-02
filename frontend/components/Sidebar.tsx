@@ -41,7 +41,7 @@ export function Sidebar() {
 
       {/* New chat */}
       <button
-        onClick={() => router.push("/")}
+        onClick={() => { window.history.pushState(null, "", "/"); window.location.href = "/"; }}
         className="mb-3 flex w-full items-center gap-2 rounded-2xl bg-[#6f4523] px-4 py-2.5 text-sm font-medium text-white shadow-sm hover:bg-[#5a381c]"
       >
         + New chat
@@ -56,7 +56,7 @@ export function Sidebar() {
               : "text-[#6b5744] hover:bg-[#f3e5d3]/60"
           }`}
         >
-          📄 Documents
+          📄 Document Uploads
         </Link>
       )}
 
@@ -92,11 +92,14 @@ export function Sidebar() {
 
       {/* Stats */}
       {stats && stats.total_requests > 0 && (
-        <div className="mb-2 rounded-2xl bg-[#f3e5d3]/60 px-3 py-2 text-xs text-[#6b5744]">
-          <p>{stats.total_requests} requests · {Math.round(stats.cache_hit_rate * 100)}% cached</p>
-          <p>avg {stats.avg_latency_ms}ms</p>
-        </div>
-      )}
+  <div className="mb-2 rounded-2xl bg-[#f3e5d3]/60 px-3 py-2 text-xs text-[#6b5744]">
+    <p className="mb-1 font-semibold uppercase tracking-wide text-[10px] text-[#a68a6d]">
+      ⚡ Usage
+    </p>
+    <p>{stats.total_requests} requests · {Math.round(stats.cache_hit_rate * 100)}% cached</p>
+    <p>avg {stats.avg_latency_ms}ms response</p>
+  </div>
+)}
 
       {/* User profile, pinned bottom */}
       <div className="mt-2 border-t border-[#e8d3b8] pt-2">

@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from backend.auth import CurrentUser, get_current_user, require_roles
 from backend.ingestion.ingestion import (
+    get_pdf_url,
     supabase,
     VALID_ROLES,
     search_documents,
@@ -25,6 +26,7 @@ from backend.ingestion.ingestion import (
     store_cache,
     log_request,
     is_simple_question,
+    expand_graph_context
 )
 from backend.ingestion.agent import ask_agent
 
@@ -190,6 +192,52 @@ def get_messages(conversation_id: str, user: CurrentUser = Depends(get_current_u
     )
     return {"messages": res.data or []}
 
+@app.get("/documents/{document_id}/graph")
+def get_document_graph(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    doc = (
+        supabase.table("documents")
+        .select("id")
+        .eq("id", document_id)
+        .eq("tenant_id", user.tenant_id)
+        .execute()
+        .data
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    entities = (
+        supabase.table("entities")
+        .select("id, name, type")
+        .eq("document_id", document_id)
+        .execute()
+        .data or []
+    )
+    relations = (
+        supabase.table("relations")
+        .select("source_entity_id, target_entity_id, relation")
+        .eq("document_id", document_id)
+        .execute()
+        .data or []
+    )
+    return {"entities": entities, "relations": relations}
+
+@app.get("/documents/{document_id}/file")
+def get_document_file(document_id: str, user: CurrentUser = Depends(get_current_user)):
+    doc = (
+        supabase.table("documents")
+        .select("id")
+        .eq("id", document_id)
+        .eq("tenant_id", user.tenant_id)
+        .execute()
+        .data
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    url = get_pdf_url(document_id)
+    if not url:
+        raise HTTPException(status_code=404, detail="File not available")
+    return {"url": url}
+
 
 @app.post("/ask/chat")
 def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)):
@@ -215,7 +263,8 @@ def ask_chat(data: AskWithHistory, user: CurrentUser = Depends(get_current_user)
     else:
         model_used = "small" if is_simple_question(data.question) else "standard"
         results = search_documents(data.question, user.tenant_id, user.role)
-        context = "\n".join(item["content"] for item in results)
+        doc_ids = list({r["document_id"] for r in results})
+        context = "\n".join(item["content"] for item in results) + expand_graph_context(doc_ids, data.question)
         answer = generate_answer_routed(data.question, context, use_small_model=(model_used == "small"))
         sources = results
         store_cache(data.question, user.tenant_id, answer, sources)

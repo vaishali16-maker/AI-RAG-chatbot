@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { RequireAuth } from "@/lib/require-auth";
 import { useAuth } from "@/lib/auth-context";
 import { Sidebar } from "@/components/Sidebar";
+import Link from "next/link";
 
 type Doc = {
   id: string;
@@ -119,12 +120,25 @@ function DocumentsManager() {
         className="mb-8 rounded-2xl border border-[#e8d3b8] bg-white/90 p-5 shadow-sm"
       >
         <h2 className="mb-3 text-sm font-medium text-[#3d2817]">Upload a document</h2>
-        <input
-          type="file"
-          accept="application/pdf"
-          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          className="mb-3 block text-sm text-[#6b5744]"
-        />
+
+        <label
+          htmlFor="pdf-upload"
+          className="mb-3 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[#d9c3a4] bg-[#faf3e8] px-6 py-8 text-center hover:border-[#6f4523] hover:bg-[#f3e5d3]"
+        >
+          <span className="mb-2 text-2xl">📄</span>
+          <span className="text-sm font-medium text-[#3d2817]">
+            {file ? file.name : "Click to choose a PDF"}
+          </span>
+          <span className="mt-1 text-xs text-[#a68a6d]">or drag and drop here</span>
+          <input
+            id="pdf-upload"
+            type="file"
+            accept="application/pdf"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            className="hidden"
+          />
+        </label>
+
         <p className="mb-2 text-xs text-[#a68a6d]">
           Visible to (leave all unchecked for everyone):
         </p>
@@ -167,12 +181,30 @@ function DocumentsManager() {
                     {d.allowed_roles?.join(", ") || "all roles"}
                   </p>
                 </div>
-                <button
-                  onClick={() => handleDelete(d.id)}
-                  className="text-sm text-red-600 hover:text-red-700"
-                >
-                  Delete
-                </button>
+                <div className="flex items-center gap-4">
+                  <Link
+                    href={`/documents/${d.id}/graph`}
+                    className="text-sm text-[#6f4523] hover:text-[#5a381c]"
+                  >
+                    View Graph
+                  </Link>
+                  <button
+                    onClick={() => handleDelete(d.id)}
+                    className="text-sm text-red-600 hover:text-red-700"
+                  >
+                    Delete
+                  </button>
+                  <button
+  onClick={async () => {
+    const res = await apiFetch(`/documents/${d.id}/file`);
+    const data = await res.json();
+    if (data.url) window.open(data.url, "_blank");
+  }}
+  className="text-sm text-[#6f4523] hover:text-[#5a381c]"
+>
+  View
+</button>
+                </div>
               </li>
             ))}
           </ul>

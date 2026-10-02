@@ -14,14 +14,11 @@ class RAGState(TypedDict):
     sources: list
     answer: str
     
-
 # Node 1: route — decide whether this question needs document search
 ROUTER_PROMPT = """You are a router for a document Q&A assistant.
 Decide if the user's message requires searching uploaded documents to answer,
 or if it can be answered directly without any document lookup.
-
 Reply with EXACTLY one word: "retrieve" or "direct".
-
 Examples:
 - "hi" -> direct
 - "what can you do?" -> direct

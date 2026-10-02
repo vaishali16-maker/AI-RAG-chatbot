@@ -5,6 +5,7 @@ import { useSearchParams } from "next/navigation";
 import { RequireAuth } from "@/lib/require-auth";
 import { useAuth } from "@/lib/auth-context";
 import { Sidebar } from "@/components/Sidebar";
+import { DocumentPanel } from "@/components/DocumentPanel";
 
 type Source = {
   document_id?: string;
@@ -26,11 +27,11 @@ export default function HomePage() {
       <div className="flex h-screen">
         <Sidebar />
         <Chat />
+        <DocumentPanel />
       </div>
     </RequireAuth>
   );
 }
-
 function Chat() {
   const { apiFetch } = useAuth();
   const searchParams = useSearchParams();
