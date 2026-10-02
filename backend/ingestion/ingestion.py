@@ -7,7 +7,10 @@ import fitz  # pymupdf
 import cohere
 from dotenv import load_dotenv
 from supabase import create_client, Client
-import ollama
+try:
+    import ollama
+except ImportError:
+    ollama = None
 import requests
 from typing import Optional
 
@@ -45,8 +48,7 @@ def _call_llm_with_model(messages: list[dict], model: str) -> str:
             return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         except Exception as e:
             raise RuntimeError(f"Groq generation failed: {e}") from e
-    return _call_llm(messages)  # fallback to Ollama path if no Groq key
-
+    return _call_llm(messages)  
 
 def _call_llm(messages: list[dict]) -> str:
     if GROQ_API_KEY:
@@ -68,6 +70,8 @@ def _call_llm(messages: list[dict]) -> str:
         except Exception as e:
             raise RuntimeError(f"Groq generation failed: {e}") from e
     else:
+        if ollama is None:
+            raise RuntimeError("No GROQ_API_KEY set and ollama is not installed")
         try:
             response = ollama.chat(model=EMBED_MODEL_NAME, messages=messages, think=False)
             return response["message"]["content"].strip()
@@ -110,6 +114,9 @@ def _call_llm_stream(messages: list[dict]):
         except Exception as e:
             yield f"[error: Groq generation failed — {e}]"
     else:
+        if ollama is None:
+            yield "[error: No GROQ_API_KEY set and ollama is not installed]"
+            return
         try:
             stream = ollama.chat(
                 model=EMBED_MODEL_NAME, messages=messages, think=False, stream=True
@@ -120,7 +127,6 @@ def _call_llm_stream(messages: list[dict]):
                     yield token
         except Exception as e:
             yield f"[error: Ollama generation failed — {e}]"
-
 
 # 1. Extraction (layout-aware, with TOC-page filtering)
 def _order_blocks_by_column(blocks: list, page_width: float) -> list:
